@@ -1,0 +1,135 @@
+name: DuMate Daily
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    # 00:13 Beijing time (UTC+8). GitHub cron uses UTC.
+    - cron: "13 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dumate-daily
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: Asia/Shanghai
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "ruff>=0.6,<1"
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Python files
+        run: python -m compileall -q .
+
+      - name: Ruff check
+        run: python -m ruff check dumate_daily.py dumate_login.py tests
+
+  claim:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check credentials
+        id: credentials
+        shell: bash
+        env:
+          DUMATE_COOKIES: ${{ secrets.DUMATE_COOKIES }}
+          DUMATE_COOKIE: ${{ secrets.DUMATE_COOKIE }}
+        run: |
+          if [ -n "${DUMATE_COOKIES:-}" ] || [ -n "${DUMATE_COOKIE:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=DuMate Daily::Credentials detected."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=DuMate Daily::No DUMATE_COOKIES or DUMATE_COOKIE configured; scheduled claim skipped."
+          fi
+
+      - name: Run DuMate
+        if: steps.credentials.outputs.available == 'true'
+        env:
+          DUMATE_COOKIES: ${{ secrets.DUMATE_COOKIES }}
+          DUMATE_COOKIE: ${{ secrets.DUMATE_COOKIE }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
+          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          DUMATE_WEBHOOK_URL: ${{ secrets.DUMATE_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -o pipefail
+          python dumate_daily.py | tee dumate-report.jsonl
+
+      - name: Build JSON report
+        if: always() && steps.credentials.outputs.available == 'true'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          raw_path = Path("dumate-report.jsonl")
+          output_path = Path("dumate-report.json")
+          records = []
+          if raw_path.exists():
+              for line in raw_path.read_text(encoding="utf-8").splitlines():
+                  if line.strip():
+                      records.append(json.loads(line))
+          output_path.write_text(
+              json.dumps(records, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload JSON report
+        if: always() && steps.credentials.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dumate-report-${{ github.run_id }}
+          path: |
+            dumate-report.json
+            dumate-report.jsonl
+          if-no-files-found: warn
+          retention-days: 30

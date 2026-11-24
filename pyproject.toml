@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dumate-daily"
+version = "1.0.0"
+description = "Baidu DuMate daily login bonus runner with strict server-side readback"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "L0NE-6" },
+]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "requests>=2.31,<3",
+  "cryptography>=42,<49",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.6,<1",
+]
+
+[project.scripts]
+dumate-daily = "dumate_daily:main"
+dumate-login = "dumate_login:main"
+
+[tool.setuptools]
+py-modules = ["dumate_daily", "dumate_login"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 88
+extend-exclude = ["__pycache__"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
