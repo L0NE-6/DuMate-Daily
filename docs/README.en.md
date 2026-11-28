@@ -2,7 +2,7 @@
 
 # 🧭 DuMate Daily
 
-**Baidu DuMate daily login bonus · multi-account isolation · status → claim → status / points**
+**Baidu DuMate daily login bonus · booster plan · multi-account isolation · status → claim → status / points**
 
 [简体中文](../README.md) · [English](README.en.md) · [繁體中文](README.zh-Hant.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Português (BR)](README.pt-BR.md)
 
@@ -43,6 +43,33 @@ GET loginBonusInfo
 ```
 
 An HTTP 200 or a successful POST response alone is not success.
+
+## Booster Plan (same script)
+
+The login bonus and the booster plan run in **one script, one run, one result** —
+there is no second entry point. After sign-in the script reads the growth-plan
+status, submits every unfinished task (`task_id` only), then draws with the
+remaining draw count. Physical prizes are claimed with `--contact`.
+
+```text
+GET  growth-plan/page/status
+POST growth-plan/tasks                   -> unfinished tasks
+POST growth-plan/task/complete {task_id} -> reward_count -> draw count
+GET  growth-plan/draw/status
+POST growth-plan/draw (X-Bce-Request-Id)
+POST growth-plan/prize/claim {draw_record_id, contact}
+```
+
+Not every task can be completed automatically. Tasks carrying `query` or
+`suiteName` are gated by the front-end until real evidence exists, and
+subscription tasks need a real subscription; those are flagged
+`needs_evidence`. The server always has the final say — the script submits a
+`task_id` and never fabricates task behaviour. Draw/redeem endpoints go through
+Baidu acs+banti signing, so a risk reply is reported as `RISK_BLOCKED`, never as
+success.
+
+`--no-booster` · `--booster-only` · `--booster-dry-run` · `--no-draw` ·
+`--max-draw N` · `--contact CONTACT` · `--task ID|NAME`
 
 ## Credentials
 

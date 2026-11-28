@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.parse import quote_plus
@@ -600,7 +601,430 @@ def _result(
     return payload
 
 
-def check_account(
+# ---------------------------------------------------------------------------
+# Booster plan (growth plan): finish tasks -> draw -> claim physical prizes
+#
+# Endpoints come from the official web bundle (api/dumate/activity/growth-plan/*).
+# The front-end gates a report behind task evidence: a task carrying ``query``
+# only reports when the current artifact matches it, and ``SUITE`` tasks need
+# the matching suite. The server still has the final say, so a rejected report
+# is surfaced as a per-task failure instead of being treated as done.
+# ---------------------------------------------------------------------------
+
+PAGE_STATUS_PATH = "/api/dumate/activity/growth-plan/page/status"
+BOOSTER_TASKS_PATH = "/api/dumate/activity/growth-plan/tasks"
+COMPLETE_TASK_PATH = "/api/dumate/activity/growth-plan/task/complete"
+DRAW_STATUS_PATH = "/api/dumate/activity/growth-plan/draw/status"
+DRAW_PATH = "/api/dumate/activity/growth-plan/draw"
+CLAIM_PRIZE_PATH = "/api/dumate/activity/growth-plan/prize/claim"
+
+DEFAULT_CLIENT_VERSION = "1.0.82"
+DEFAULT_DEVICE = "pc"
+
+# Task types the front-end only reports after real evidence (query / suiteName)
+# or after a real subscription state. They are still attempted, but flagged.
+EVIDENCE_REQUIRED_TYPES = frozenset(
+    {
+        "CODE_MODE",
+        "QUERY_INPUT",
+        "USE_SKILL",
+        "CREATE_SCHEDULED_TASK",
+        "FIRST_CREATE_SCHEDULED_TASK",
+        "SUITE",
+        "MEDIA_SUITE_CREATION",
+        "INVITATION",
+        "INVITED",
+        "FIRST_PRO_AUTO_RENEW",
+        "PRO_AUTO_RENEW",
+    }
+)
+
+
+def _pick(payload: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in payload and payload[name] is not None:
+            return payload[name]
+    return None
+
+
+def _unwrap(payload: Any) -> Mapping[str, Any]:
+    """Return the payload body, tolerating one extra ``result``/``data`` layer."""
+    if not isinstance(payload, Mapping):
+        raise APIError("BAD_PAYLOAD", "response is not a JSON object")
+    for key in ("result", "data"):
+        inner = payload.get(key)
+        if isinstance(inner, Mapping) and len(payload) <= 3:
+            return inner
+    return payload
+
+
+def _is_risk_message(message: str) -> bool:
+    text = str(message or "").lower()
+    return any(
+        token in text
+        for token in ("风控", "风险", "risk", "forbidden", "captcha", "验证", "频繁")
+    )
+
+
+def _check_business(body: Any, *, action: str) -> Mapping[str, Any]:
+    """``_request_json`` already unwraps ``result`` and rejects the envelope.
+
+    Some endpoints repeat ``success`` / ``code`` inside ``result``; honour those
+    too, and translate a risk-control message into ``RISK_BLOCKED`` so a block
+    is never mistaken for a completed task.
+    """
+    if not isinstance(body, Mapping):
+        return {}
+    message = str(body.get("message") or body.get("msg") or "")
+    code = body.get("code")
+    failed = body.get("success") is False or code not in (None, 0, "0", 200, "200")
+    if not failed:
+        return body
+    if _is_risk_message(message):
+        raise APIError("RISK_BLOCKED", "%s blocked by risk control: %s" % (action, message))
+    raise APIError("BUSINESS_ERROR", "%s failed (code=%s): %s" % (action, code, message))
+
+
+def parse_page_status(payload: Any) -> dict[str, Any]:
+    body = _unwrap(payload)
+    config = body.get("config") if isinstance(body.get("config"), Mapping) else {}
+    return {
+        "activity_id": _pick(body, "activity_id", "activityId"),
+        "enabled": _pick(body, "enabled") is not False,
+        "growth_plan_enable": _pick(body, "growth_plan_enable", "growthPlanEnable") is not False,
+        "start_time": _pick(body, "start_time", "startTime"),
+        "end_time": _pick(body, "end_time", "endTime"),
+        "title": _pick(config, "title", "entry_title") if isinstance(config, Mapping) else None,
+    }
+
+
+def _normalize_task(item: Mapping[str, Any]) -> dict[str, Any]:
+    completed = _number(_pick(item, "completed_count", "completedCount", "finished_count"))
+    repeat = _number(_pick(item, "repeat_count", "repeatCount", "max_count"))
+    finished_flag = _pick(item, "finished", "completed", "done")
+    if completed is None:
+        completed = 1.0 if finished_flag is True else 0.0
+    if repeat is None or repeat <= 0:
+        repeat = max(1.0, completed)
+    query = _pick(item, "query")
+    suite_name = _pick(item, "suite_name", "suiteName")
+    return {
+        "task_id": str(_pick(item, "task_id", "taskId") or ""),
+        "task_name": _pick(item, "task_name", "taskName", "name"),
+        "task_type": _pick(item, "task_type", "taskType"),
+        "completed_count": int(completed),
+        "repeat_count": int(repeat),
+        "finished": completed >= repeat,
+        "reward_points": _number(_pick(item, "reward_points", "rewardPoints", "points")),
+        "jump_url": _pick(item, "jump_url", "jumpUrl"),
+        "query": query,
+        "suite_name": suite_name,
+        "needs_evidence": bool(query or suite_name),
+    }
+
+
+def parse_tasks(payload: Any) -> list[dict[str, Any]]:
+    body = _unwrap(payload)
+    raw = _pick(body, "tasks", "task_list", "list", "groups", "modules") or []
+    if isinstance(raw, Mapping):
+        raw = list(raw.values())
+    tasks: list[dict[str, Any]] = []
+    for item in raw if isinstance(raw, Sequence) else []:
+        if not isinstance(item, Mapping):
+            continue
+        nested = item.get("tasks")
+        if isinstance(nested, Sequence):
+            for sub in nested:
+                if isinstance(sub, Mapping):
+                    tasks.append(_normalize_task(sub))
+            continue
+        tasks.append(_normalize_task(item))
+    return [task for task in tasks if task["task_id"]]
+
+
+def parse_draw_status(payload: Any) -> dict[str, Any]:
+    body = _unwrap(payload)
+    remaining = _number(_pick(body, "remaining_draws", "remainingDraws", "remaining"))
+    return {
+        "remaining_draws": int(remaining) if remaining is not None else 0,
+        "prizes": _pick(body, "prizes") or [],
+        "my_prizes": _pick(body, "my_prizes", "myPrizes") or [],
+        "winning_records": _pick(body, "winning_records", "winningRecords") or [],
+    }
+
+
+def parse_draw_result(payload: Any) -> dict[str, Any]:
+    body = _unwrap(payload)
+    return {
+        "draw_record_id": _pick(body, "draw_record_id", "drawRecordId", "record_id", "recordId"),
+        "prize_name": _pick(body, "prize_name", "prizeName", "name"),
+        "prize_type": _pick(body, "prize_type", "prizeType", "type"),
+        "need_contact": bool(_pick(body, "need_contact", "needContact")),
+    }
+
+
+def _activity_call(
+    session: requests.Session,
+    base_url: str,
+    account: Mapping[str, Any],
+    *,
+    method: str,
+    path: str,
+    body: Optional[Mapping[str, Any]] = None,
+    extra_headers: Optional[Mapping[str, str]] = None,
+    secrets: Sequence[str],
+) -> Any:
+    headers = _headers(account, base_url=base_url, post=method != "GET")
+    if extra_headers:
+        headers.update({str(key): str(value) for key, value in extra_headers.items()})
+    try:
+        payload, _status = _request_json(
+            session,
+            method,
+            base_url + path,
+            headers=headers,
+            secrets=secrets,
+            json_body=body if method != "GET" else None,
+        )
+    except APIError as exc:
+        if exc.result == "BUSINESS_ERROR" and _is_risk_message(exc.message):
+            raise APIError("RISK_BLOCKED", exc.message) from None
+        raise
+    return payload
+
+
+def fetch_page_status(session, base_url, account, secrets) -> dict[str, Any]:
+    return parse_page_status(
+        _activity_call(
+            session, base_url, account, method="GET", path=PAGE_STATUS_PATH, secrets=secrets
+        )
+    )
+
+
+def fetch_booster_tasks(
+    session,
+    base_url,
+    account,
+    secrets,
+    *,
+    device: str = DEFAULT_DEVICE,
+    version: str = DEFAULT_CLIENT_VERSION,
+) -> list[dict[str, Any]]:
+    body: dict[str, Any] = {}
+    if device:
+        body["device"] = device
+    if version:
+        body["version"] = version
+    payload = _activity_call(
+        session,
+        base_url,
+        account,
+        method="POST",
+        path=BOOSTER_TASKS_PATH,
+        body=body,
+        secrets=secrets,
+    )
+    _check_business(payload, action="list booster tasks")
+    return parse_tasks(payload)
+
+
+def complete_booster_task(
+    session, base_url, account, secrets, task_id: str
+) -> dict[str, Any]:
+    payload = _activity_call(
+        session,
+        base_url,
+        account,
+        method="POST",
+        path=COMPLETE_TASK_PATH,
+        body={"task_id": str(task_id)},
+        secrets=secrets,
+    )
+    _check_business(payload, action="complete task %s" % task_id)
+    body = _unwrap(payload)
+    reward = _number(_pick(body, "reward_count", "rewardCount", "reward"))
+    return {
+        "task_id": str(task_id),
+        "reward_count": int(reward) if reward is not None else None,
+        "message": payload.get("message") if isinstance(payload, Mapping) else None,
+    }
+
+
+def fetch_draw_status(session, base_url, account, secrets) -> dict[str, Any]:
+    payload = _activity_call(
+        session, base_url, account, method="GET", path=DRAW_STATUS_PATH, secrets=secrets
+    )
+    _check_business(payload, action="draw status")
+    return parse_draw_status(payload)
+
+
+def draw_once(session, base_url, account, secrets) -> dict[str, Any]:
+    request_id = str(uuid.uuid4())
+    payload = _activity_call(
+        session,
+        base_url,
+        account,
+        method="POST",
+        path=DRAW_PATH,
+        body={},
+        extra_headers={"X-Bce-Request-Id": request_id},
+        secrets=secrets,
+    )
+    _check_business(payload, action="draw")
+    result = parse_draw_result(payload)
+    result["request_id"] = request_id
+    return result
+
+
+def claim_prize(
+    session, base_url, account, secrets, *, draw_record_id: Any, contact: str
+) -> bool:
+    payload = _activity_call(
+        session,
+        base_url,
+        account,
+        method="POST",
+        path=CLAIM_PRIZE_PATH,
+        body={"draw_record_id": draw_record_id, "contact": contact},
+        secrets=secrets,
+    )
+    _check_business(payload, action="claim prize")
+    return True
+
+
+def run_booster(
+    session,
+    base_url: str,
+    account: Mapping[str, Any],
+    secrets: Sequence[str],
+    *,
+    dry_run: bool = False,
+    do_draw: bool = True,
+    max_draw: int = 0,
+    contact: str = "",
+    only_tasks: Sequence[str] = (),
+    device: str = DEFAULT_DEVICE,
+    version: str = DEFAULT_CLIENT_VERSION,
+) -> dict[str, Any]:
+    """Run the booster plan for one account; never raises, reports instead."""
+    outcome: dict[str, Any] = {
+        "ok": False,
+        "error": None,
+        "page": None,
+        "tasks_before": [],
+        "completed": [],
+        "tasks_failed": [],
+        "draw": {"available": 0, "done": 0, "prizes": [], "claimed": []},
+    }
+    try:
+        page = fetch_page_status(session, base_url, account, secrets)
+        outcome["page"] = page
+        if not page.get("enabled") or not page.get("growth_plan_enable"):
+            outcome.update(ok=True, note="booster plan is not active, skipped")
+            return outcome
+
+        tasks = fetch_booster_tasks(
+            session, base_url, account, secrets, device=device, version=version
+        )
+        outcome["tasks_before"] = tasks
+        wanted = {str(item).strip() for item in only_tasks if str(item).strip()}
+        pending = [task for task in tasks if not task["finished"]]
+        if wanted:
+            pending = [
+                task
+                for task in pending
+                if task["task_id"] in wanted or str(task.get("task_name") or "") in wanted
+            ]
+        if dry_run:
+            outcome.update(ok=True, note="dry-run: booster reads only, nothing submitted")
+            return outcome
+
+        for task in pending:
+            try:
+                done = complete_booster_task(
+                    session, base_url, account, secrets, task["task_id"]
+                )
+                outcome["completed"].append(
+                    {
+                        "task_id": done["task_id"],
+                        "name": task.get("task_name"),
+                        "reward_count": done["reward_count"],
+                    }
+                )
+            except APIError as exc:
+                outcome["tasks_failed"].append(
+                    {
+                        "task_id": task["task_id"],
+                        "name": task.get("task_name"),
+                        "code": exc.result,
+                        "message": exc.message,
+                    }
+                )
+
+        if do_draw:
+            status = fetch_draw_status(session, base_url, account, secrets)
+            remaining = int(status.get("remaining_draws") or 0)
+            outcome["draw"]["available"] = remaining
+            limit = remaining if max_draw <= 0 else min(remaining, int(max_draw))
+            for _ in range(limit):
+                try:
+                    drawn = draw_once(session, base_url, account, secrets)
+                except APIError as exc:
+                    outcome["draw"]["prizes"].append(
+                        {"error": exc.result, "message": exc.message}
+                    )
+                    break
+                outcome["draw"]["done"] += 1
+                outcome["draw"]["prizes"].append(drawn)
+                if drawn.get("need_contact") and contact and drawn.get("draw_record_id"):
+                    try:
+                        claim_prize(
+                            session,
+                            base_url,
+                            account,
+                            secrets,
+                            draw_record_id=drawn["draw_record_id"],
+                            contact=contact,
+                        )
+                        outcome["draw"]["claimed"].append(drawn["draw_record_id"])
+                    except APIError as exc:
+                        outcome["draw"]["prizes"].append(
+                            {"claim_error": exc.result, "message": exc.message}
+                        )
+            outcome["draw"]["after"] = (
+                fetch_draw_status(session, base_url, account, secrets)
+                if limit
+                else status
+            )
+
+        outcome["ok"] = True
+    except APIError as exc:
+        outcome["error"] = {
+            "code": exc.result,
+            "message": exc.message,
+            "http_status": exc.http_status,
+        }
+    except ConfigError as exc:
+        outcome["error"] = {"code": "CONFIG_ERROR", "message": str(exc)}
+    except Exception as exc:
+        outcome["error"] = {
+            "code": "UNEXPECTED_ERROR",
+            "message": "unexpected error: %s" % _redact(exc, secrets),
+        }
+    return outcome
+
+
+def booster_summary(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate booster counters across accounts."""
+    outcomes = [result.get("booster") for result in results if isinstance(result.get("booster"), Mapping)]
+    return {
+        "accounts": len(outcomes),
+        "tasks_completed": sum(len(item.get("completed") or []) for item in outcomes),
+        "tasks_failed": sum(len(item.get("tasks_failed") or []) for item in outcomes),
+        "draws_done": sum(int((item.get("draw") or {}).get("done") or 0) for item in outcomes),
+    }
+
+def _check_signin(
     account: Mapping[str, Any],
     *,
     mode: str = "claim",
@@ -761,6 +1185,83 @@ def check_account(
             close()
 
 
+def _account_secrets(account: Mapping[str, Any]) -> list[str]:
+    """Credential values that must never appear in a message or a report."""
+    secrets = [
+        str(account.get("cookie_header", "")),
+        str(account.get("csrf", "")),
+    ]
+    cookies = account.get("cookies", [])
+    if isinstance(cookies, Iterable):
+        for item in cookies:
+            if isinstance(item, CookieValue):
+                secrets.extend([item.value, item.name + "=" + item.value])
+    return secrets
+
+
+# Sign-in failures that make a booster attempt pointless (no usable session)
+_BOOSTER_SKIP_RESULTS = frozenset({"CONFIG_ERROR", "CREDENTIAL_INCOMPLETE", "AUTH_EXPIRED"})
+
+
+def check_account(
+    account: Mapping[str, Any],
+    *,
+    mode: str = "claim",
+    base_url: Optional[str] = None,
+    session_factory: Callable[[], requests.Session] = make_session,
+    booster: bool = True,
+    booster_options: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    """Claim the login bonus, then optionally run the booster plan."""
+    result = _check_signin(
+        account,
+        mode=mode,
+        base_url=base_url,
+        session_factory=session_factory,
+    )
+    options = dict(booster_options or {})
+    if not booster:
+        return result
+    if mode == "query" and not options.get("booster_only"):
+        return result
+    if result.get("result") in _BOOSTER_SKIP_RESULTS:
+        result["booster"] = {
+            "ok": False,
+            "skipped": True,
+            "reason": "sign-in failed (%s), booster not attempted" % result.get("result"),
+        }
+        return result
+
+    resolved_base_url = _normalize_base_url(base_url or resolve_base_url())
+    secrets = _account_secrets(account)
+    session = None
+    try:
+        session = session_factory()
+        result["booster"] = run_booster(
+            session,
+            resolved_base_url,
+            account,
+            secrets,
+            dry_run=bool(options.get("dry_run")),
+            do_draw=bool(options.get("do_draw", True)),
+            max_draw=int(options.get("max_draw") or 0),
+            contact=str(options.get("contact") or ""),
+            only_tasks=options.get("only_tasks") or (),
+            device=str(options.get("device") or DEFAULT_DEVICE),
+            version=str(options.get("version") or DEFAULT_CLIENT_VERSION),
+        )
+    except Exception as exc:
+        result["booster"] = {
+            "ok": False,
+            "error": {"code": "UNEXPECTED_ERROR", "message": "unexpected error: %s" % _redact(exc, secrets)},
+        }
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close):
+            close()
+    return result
+
+
 def run_accounts(
     accounts: Sequence[Mapping[str, Any]],
     *,
@@ -768,6 +1269,8 @@ def run_accounts(
     base_url: Optional[str] = None,
     session_factory: Callable[[], requests.Session] = make_session,
     output: Callable[[Mapping[str, Any]], None] = emit,
+    booster: bool = True,
+    booster_options: Optional[Mapping[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for account in accounts:
@@ -776,6 +1279,8 @@ def run_accounts(
             mode=mode,
             base_url=base_url,
             session_factory=session_factory,
+            booster=booster,
+            booster_options=booster_options,
         )
         results.append(result)
         output(result)
@@ -795,6 +1300,7 @@ def build_summary(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "already_claimed": sum(
             1 for result in results if result.get("result") == "ALREADY_CLAIMED"
         ),
+        "booster": booster_summary(results),
         "results": [dict(result) for result in results],
     }
 
@@ -982,6 +1488,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable configured push channels for this run",
     )
     parser.add_argument(
+        "--no-booster",
+        action="store_true",
+        help="skip the booster plan (tasks / draws) and only handle the login bonus",
+    )
+    parser.add_argument(
+        "--booster-only",
+        action="store_true",
+        help="skip the login-bonus claim and run the booster plan only",
+    )
+    parser.add_argument(
+        "--booster-dry-run",
+        action="store_true",
+        help="read booster status and tasks without submitting anything",
+    )
+    parser.add_argument(
+        "--no-draw",
+        action="store_true",
+        help="complete booster tasks but do not draw",
+    )
+    parser.add_argument(
+        "--max-draw",
+        type=int,
+        default=0,
+        help="cap draws in this run (default: use the remaining draws reported by the server)",
+    )
+    parser.add_argument(
+        "--contact",
+        default="",
+        help="contact info used to claim a physical prize",
+    )
+    parser.add_argument(
+        "--task",
+        action="append",
+        default=[],
+        metavar="TASK_ID|NAME",
+        help="only attempt these booster tasks (repeatable), useful to verify one by one",
+    )
+    parser.add_argument(
         "action",
         nargs="?",
         choices=("status",),
@@ -999,6 +1543,16 @@ def main(
 ) -> int:
     args = build_parser().parse_args(argv)
     mode = "query" if args.query or args.action == "status" else "claim"
+    if args.booster_only:
+        mode = "query"
+    booster_options = {
+        "dry_run": bool(args.booster_dry_run),
+        "do_draw": not args.no_draw,
+        "max_draw": int(args.max_draw or 0),
+        "contact": str(args.contact or ""),
+        "only_tasks": list(args.task or []),
+        "booster_only": bool(args.booster_only),
+    }
     try:
         accounts = load_accounts(env)
         base_url = resolve_base_url(env)
@@ -1024,6 +1578,8 @@ def main(
         base_url=base_url,
         session_factory=session_factory,
         output=output,
+        booster=not args.no_booster,
+        booster_options=booster_options,
     )
     summary = build_summary(results)
     output(summary)

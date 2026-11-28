@@ -2,7 +2,7 @@
 
 # 🧭 DuMate Daily
 
-**百度搭子每日登入積分 · 多帳號隔離 · status → claim → status / points 嚴格回讀**
+**百度搭子每日登入積分 · 搭子充能計劃 · 多帳號隔離 · status → claim → status / points 嚴格回讀**
 
 [简体中文](../README.md) · [English](README.en.md) · [繁體中文](README.zh-Hant.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Português (BR)](README.pt-BR.md)
 
@@ -39,6 +39,29 @@ GET loginBonusInfo
 ```
 
 只有 HTTP 200 或 POST 成功回執，不算完成。
+
+## 充能計劃（同一腳本）
+
+簽到與充能計劃在同一個腳本、同一次執行、同一條結果裡，**沒有第二個入口**。
+簽到之後接著讀取充能活動狀態、對未完成任務逐個提交（只送 `task_id`），再按服務端
+回報的剩餘次數抽獎；實物獎用 `--contact` 領取。
+
+```text
+GET  growth-plan/page/status
+POST growth-plan/tasks                   -> 未完成任務
+POST growth-plan/task/complete {task_id} -> reward_count -> 抽獎次數
+GET  growth-plan/draw/status
+POST growth-plan/draw (X-Bce-Request-Id)
+POST growth-plan/prize/claim {draw_record_id, contact}
+```
+
+並非所有任務都能自動完成：帶 `query` 或 `suiteName` 的任務需要真實前置行為，
+訂閱類任務需要真實訂閱狀態，報告中標記為 `needs_evidence`。最終判定在服務端——
+腳本只提交 `task_id`，不偽造任務行為。抽獎／兌換走百度 acs+banti 簽名，遇到風控
+如實回報 `RISK_BLOCKED`，不會當成成功。
+
+`--no-booster` · `--booster-only` · `--booster-dry-run` · `--no-draw` ·
+`--max-draw N` · `--contact CONTACT` · `--task ID|NAME`
 
 ## 憑據
 

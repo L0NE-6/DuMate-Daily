@@ -4,7 +4,7 @@
 
 # 🧭 DuMate Daily
 
-**百度搭子每日登录积分 · 多账号隔离 · status → claim → status / points 严格回读**
+**百度搭子每日登录积分 · 搭子充能计划 · 多账号隔离 · status → claim → status / points 严格回读**
 
 > 当前版本：**v1.0.0**（2026-11-24） · 独立仓库维护版 · 单文件运行 · 不把 HTTP 200 冒充成功
 
@@ -43,25 +43,33 @@
 
 | 维度 | 说明 |
 | :--- | :--- |
-| **做什么** | 检查百度搭子每日登录积分，未领取时领取，并用服务端状态和积分差额回读。 |
+| **做什么** | 检查百度搭子每日登录积分并领取，然后跑「充能计划」做任务 → 抽奖 → 领奖，全程服务端回读。 |
 | **输入** | `DUMATE_COOKIES`、`DUMATE_COOKIE`，或本机忽略文件 `DUMATE_COOKIE_FILE`。 |
-| **输出** | 每账号一条 JSON、最后一条汇总 JSON、签到前后状态、积分差额、积分余额。 |
+| **输出** | 每账号一条 JSON（含签到结果与充能结果）、最后一条汇总 JSON、积分差额、任务完成情况、抽奖记录。 |
 | **部署** | Windows、Linux、青龙面板、GitHub Actions。 |
 | **依赖** | Python 3.9+；运行依赖 `requests`，桌面登录导入额外使用 `cryptography`。 |
 | **成功判据** | 新领取必须同时满足 `hasIssued=true` 和 `totalPoints` 正差额。 |
 
 ## ✨ 这是什么
 
-DuMate Daily 是 L0NE-6 原创维护的独立签到脚本。它只处理百度搭子的每日登录积分：
+DuMate Daily 是 L0NE-6 原创维护的独立脚本，**一个脚本管两件事**：每日登录积分（签到）+ 搭子充能计划（做任务 / 抽奖 / 领奖）。一次运行、一条结果，不分两个入口。
+
+签到部分：
 
 1. 读取领取前状态；
 2. 已领取时直接返回 `ALREADY_CLAIMED`；
 3. 未领取时提交一次领取；
 4. 再次读取 `hasIssued`、累计签到天数和累计签到积分；
 5. 只有状态翻转为已领取且积分确实增加，才返回 `CLAIMED`；
-6. 最后读取积分总览，记录套餐总积分、已用积分和剩余积分。
+6. 读取积分总览，记录套餐总积分、已用积分和剩余积分。
 
-脚本不会把“POST 成功”“HTTP 200”或“页面提示成功”单独当成领取完成。
+充能计划部分（签到之后接着跑，`--no-booster` 可关）：
+
+7. 读取活动状态，未开启则跳过；
+8. 拉任务列表，只对 `completed_count < repeat_count` 的任务提交；
+9. 按服务端返回的剩余次数抽奖，实物奖可用 `--contact` 领。
+
+脚本不会把“POST 成功”“HTTP 200”或“页面提示成功”单独当成完成 —— 签到看 `hasIssued` + 积分差额，充能看每个任务的返回与抽奖记录。
 
 ---
 
@@ -104,10 +112,9 @@ GET /api/dumate/points/loginBonusInfo
 ---
 
 <a id="booster"></a>
-## ⚡ 充能计划（做任务 / 抽奖 / 领奖）
+## ⚡ 充能计划（同一脚本内：做任务 / 抽奖 / 领奖）
 
-签到之外，官网还有「搭子充能计划」：做任务换抽奖次数，抽积分/实物。`dumate_booster.py`
-只跑这部分，账号 Cookie 与签到共用（同一套 `DUMATE_COOKIES`）。
+签到之后紧接着跑，**不额外装脚本、不额外配凭据** —— 同一套 `DUMATE_COOKIES`。结果嵌在同一条账号 JSON 的 `booster` 字段里。
 
 ```text
 GET  /api/dumate/activity/growth-plan/page/status   活动是否开启
@@ -127,35 +134,37 @@ POST /api/dumate/activity/growth-plan/draw          抽奖（header: X-Bce-Reque
 `INVITED`、`DOWNLOAD_MOBILE_CHAT`、`DOWNLOAD_PC_CHAT`、`FIRST_CREATE_SCHEDULED_TASK`、
 `FIRST_PRO_AUTO_RENEW`、`PRO_AUTO_RENEW`、`COFFEE2026`、`SUITE`。
 
-```bash
-python3 dumate_booster.py                 # 查任务 → 能完成的完成 → 抽奖
-python3 dumate_booster.py --dry-run       # 只读：只看状态和任务，不做写操作
-python3 dumate_booster.py --no-draw       # 只做任务，不抽奖
-python3 dumate_booster.py --max-draw 3    # 最多抽 3 次
-python3 dumate_booster.py --contact 手机号 # 抽中实物奖时自动领奖
-```
-
 ### 能自动完成哪些任务？—— 不是全部
 
-前端在把任务上报为「完成」之前有校验（`module 80098` / `module 229...` 的 gate）：
+前端在把任务上报为「完成」之前有校验：任务带 `query` 时当前产物必须命中该 query；`SUITE` 类
+必须真的用了对应套件（自媒体套件 / 教学套件 / 文档处理专家 / 金融套件 / 设计套件 / 智慧教育平台 /
+胜算数据套件）；本地还要有 `activity_task_activation` 激活标记。最终判定在服务端。
 
-- 任务带 `query` 字段时，当前产物必须命中该 query，否则前端直接不发起上报；
-- `SUITE` 类任务必须真的使用了对应套件（`suiteName` 白名单：自媒体套件 / 教学套件 / 文档处理专家 / 金融套件 / 设计套件 / 智慧教育平台 / 胜算数据套件）；
-- 本地还要有 `activity_task_activation` 激活标记。
-
-因此实际分三类：
-
-| 类型 | 任务 | 直接提交 `task_id` 的预期 |
+| 类型 | 典型任务 | 直接提交 `task_id` 的预期 |
 | :--- | :--- | :--- |
-| **状态型** | 双端登录、推送开关、下载客户端、邀请类 | 有机会通过，取决于服务端是否只查状态 |
-| **行为型（带 `query` / `suiteName`）** | 代码模式对话、查询输入、使用技能、创建定时任务、套件创作 | 大概率不通过 —— 需要先真的做一次对应操作 |
+| **状态型** | 双端登录、推送开关、下载客户端、邀请类 | 有机会通过，取决于服务端是否只查状态位 |
+| **行为型**（带 `query` / `suiteName`） | 代码模式对话、查询输入、使用技能、创建定时任务、套件创作 | 大概率不通过 —— 需要先真的做一次对应操作 |
 | **订阅型** | 首次 Pro 自动续费、Pro 自动续费 | 需要真有对应订阅状态 |
 
-报告里对行为型/订阅型会标 `← 需真实前置行为(可能不通过)`。想逐个验证，用：
+报告里对行为型/订阅型会标 `needs_evidence`（人读提示「需真实前置行为(可能不通过)」）。想逐个验证：
 
 ```bash
-python3 dumate_booster.py --dry-run --json                  # 先看任务清单与字段
-python3 dumate_booster.py --no-draw --task TASK_ID_1        # 只试一个
+python dumate_daily.py --booster-only --booster-dry-run        # 只看充能状态与任务
+python dumate_daily.py --booster-only --no-draw --task TASK_ID # 只试一个任务
+```
+
+### 参数
+
+```bash
+python dumate_daily.py                      # 签到 + 充能（默认）
+python dumate_daily.py --no-booster         # 只签到，不碰充能计划
+python dumate_daily.py --booster-only       # 只跑充能计划（签到转查询模式，不领取）
+python dumate_daily.py --booster-dry-run    # 充能只读：看任务，不提交
+python dumate_daily.py --no-draw            # 做任务但不抽奖
+python dumate_daily.py --max-draw 3         # 最多抽 3 次
+python dumate_daily.py --contact 手机号      # 抽中实物奖时自动领
+python dumate_daily.py --task TASK_ID_OR_NAME   # 只尝试指定任务（可重复）
+python dumate_daily.py --query              # 只查签到状态，不动充能
 ```
 
 风控说明：官网对写操作（完成任务 / 抽奖 / 兑换）会走百度 acs+banti 签名，本脚本默认不带；
@@ -405,7 +414,7 @@ python dumate_daily.py --no-notify     # 本次不推送
 ```powershell
 python -m unittest discover -s tests -v
 python -m compileall -q .
-python -m ruff check dumate_daily.py dumate_booster.py dumate_login.py tests
+python -m ruff check dumate_daily.py dumate_login.py tests
 ```
 
 测试全部使用 fake response / fake session：
@@ -476,7 +485,6 @@ DuMate-Daily/
 │   ├── test_dumate_booster.py
 │   └── test_dumate_login.py
 ├── dumate_daily.py
-├── dumate_booster.py
 ├── dumate_login.py
 ├── CHANGELOG.md
 ├── LICENSE

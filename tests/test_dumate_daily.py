@@ -21,6 +21,17 @@ COOKIE = (
 )
 
 
+def _signin_check_account(account, **kwargs):
+    """Sign-in tests only: booster has its own test module."""
+    kwargs.setdefault("booster", False)
+    return dumate_daily.check_account(account, **kwargs)
+
+
+def _signin_run_accounts(accounts, **kwargs):
+    kwargs.setdefault("booster", False)
+    return dumate_daily.run_accounts(accounts, **kwargs)
+
+
 class FakeResponse:
     def __init__(
         self,
@@ -170,7 +181,7 @@ class DuMateDailyTests(unittest.TestCase):
                 ]
             ]
         )
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             account(),
             base_url="https://example.test",
             session_factory=factory,
@@ -195,7 +206,7 @@ class DuMateDailyTests(unittest.TestCase):
         factory = SessionFactory(
             [[bonus(True, 900, 30), quota(2000, 500)]]
         )
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             account(),
             base_url="https://example.test",
             session_factory=factory,
@@ -211,7 +222,7 @@ class DuMateDailyTests(unittest.TestCase):
         factory = SessionFactory(
             [[bonus(False, 100, 2), quota(500, 100)]]
         )
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             account(),
             mode="query",
             base_url="https://example.test",
@@ -236,7 +247,7 @@ class DuMateDailyTests(unittest.TestCase):
                 ]
             ]
         )
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             account(),
             base_url="https://example.test",
             session_factory=factory,
@@ -257,7 +268,7 @@ class DuMateDailyTests(unittest.TestCase):
                 ]
             ]
         )
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             account(),
             base_url="https://example.test",
             session_factory=factory,
@@ -277,7 +288,7 @@ class DuMateDailyTests(unittest.TestCase):
                 ]
             ]
         )
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             account(),
             base_url="https://example.test",
             session_factory=factory,
@@ -297,7 +308,7 @@ class DuMateDailyTests(unittest.TestCase):
                 ]
             ]
         )
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             account(),
             base_url="https://example.test",
             session_factory=factory,
@@ -309,7 +320,7 @@ class DuMateDailyTests(unittest.TestCase):
             {"DUMATE_COOKIE": "bce-sessionid=session-only"}
         )[0]
         factory = SessionFactory([])
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             missing,
             base_url="https://example.test",
             session_factory=factory,
@@ -331,7 +342,7 @@ class DuMateDailyTests(unittest.TestCase):
                 ]
             ]
         )
-        result = dumate_daily.check_account(
+        result = _signin_check_account(
             account(),
             base_url="https://example.test",
             session_factory=factory,
@@ -363,7 +374,7 @@ class DuMateDailyTests(unittest.TestCase):
             ]
         )
         output = []
-        results = dumate_daily.run_accounts(
+        results = _signin_run_accounts(
             accounts,
             base_url="https://example.test",
             session_factory=factory,
@@ -385,7 +396,7 @@ class DuMateDailyTests(unittest.TestCase):
         )
         output = []
         code = dumate_daily.main(
-            ["--no-notify"],
+            ["--no-booster", "--no-notify"],
             env={"DUMATE_COOKIE": COOKIE},
             session_factory=factory,
             output=output.append,
@@ -396,7 +407,7 @@ class DuMateDailyTests(unittest.TestCase):
 
         config_output = []
         code = dumate_daily.main(
-            [],
+            ["--no-booster"],
             env={},
             session_factory=SessionFactory([]),
             output=config_output.append,
@@ -418,7 +429,7 @@ class DuMateDailyTests(unittest.TestCase):
         output = []
         with contextlib.redirect_stdout(io.StringIO()):
             code = dumate_daily.main(
-                ["--only", "2", "--no-notify"],
+                ["--no-booster", "--only", "2", "--no-notify"],
                 env=accounts_env,
                 session_factory=factory,
                 output=output.append,

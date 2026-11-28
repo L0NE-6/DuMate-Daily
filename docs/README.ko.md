@@ -2,7 +2,7 @@
 
 # 🧭 DuMate Daily
 
-**Baidu DuMate 일일 로그인 보너스 · 다중 계정 · status → claim → status / points 재확인**
+**Baidu DuMate 일일 로그인 보너스 · 부스트 플랜 · 다중 계정 · status → claim → status / points 재확인**
 
 [简体中文](../README.md) · [English](README.en.md) · [繁體中文](README.zh-Hant.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Português (BR)](README.pt-BR.md)
 
@@ -39,6 +39,29 @@ GET loginBonusInfo
 ```
 
 HTTP 200 또는 POST 성공만으로는 완료가 아닙니다.
+
+## 부스트 플랜 (동일 스크립트)
+
+로그인 보너스와 부스트 플랜은 **하나의 스크립트, 한 번의 실행, 하나의 결과**로 처리됩니다
+(별도 진입점 없음). 로그인 후 성장 플랜 상태를 읽고, 미완료 작업을 `task_id`만으로 제출한 뒤
+서버가 알려준 남은 횟수만큼 추첨합니다. 실물 상품은 `--contact`로 수령합니다.
+
+```text
+GET  growth-plan/page/status
+POST growth-plan/tasks                   -> 미완료 작업
+POST growth-plan/task/complete {task_id} -> reward_count -> 추첨 횟수
+GET  growth-plan/draw/status
+POST growth-plan/draw (X-Bce-Request-Id)
+POST growth-plan/prize/claim {draw_record_id, contact}
+```
+
+모든 작업을 자동으로 완료할 수는 없습니다. `query`·`suiteName`이 있는 작업은 실제 증빙이
+필요하고, 구독형 작업은 실제 구독 상태가 필요합니다(`needs_evidence` 표시). 최종 판정은
+서버가 하며, 스크립트는 `task_id`만 제출하고 행위를 위조하지 않습니다. 추첨·교환은 Baidu
+acs+banti 서명을 거치므로 리스크 응답은 `RISK_BLOCKED`로 보고하고 성공으로 처리하지 않습니다.
+
+`--no-booster` · `--booster-only` · `--booster-dry-run` · `--no-draw` ·
+`--max-draw N` · `--contact CONTACT` · `--task ID|NAME`
 
 ## 자격 증명
 

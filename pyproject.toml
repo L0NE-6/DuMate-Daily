@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dumate-daily"
 version = "1.0.0"
-description = "Baidu DuMate daily login bonus runner with strict server-side readback"
+description = "Baidu DuMate daily login bonus + booster-plan runner with strict server-side readback"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

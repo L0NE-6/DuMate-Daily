@@ -2,7 +2,7 @@
 
 # 🧭 DuMate Daily
 
-**Bônus diário de login do Baidu DuMate · várias contas · status → claim → status / points**
+**Bônus diário de login do Baidu DuMate · plano booster · várias contas · status → claim → status / points**
 
 [简体中文](../README.md) · [English](README.en.md) · [繁體中文](README.zh-Hant.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Português (BR)](README.pt-BR.md)
 
@@ -43,6 +43,31 @@ GET loginBonusInfo
 ```
 
 HTTP 200 ou um POST bem-sucedido isolado não é sucesso.
+
+## Plano Booster (mesmo script)
+
+O bônus de login e o plano booster rodam em **um script, uma execução, um resultado** —
+sem segundo ponto de entrada. Depois do login o script lê o status do plano, envia cada
+tarefa pendente (apenas `task_id`) e sorteia conforme as tentativas restantes. Prêmios
+físicos são resgatados com `--contact`.
+
+```text
+GET  growth-plan/page/status
+POST growth-plan/tasks                   -> tarefas pendentes
+POST growth-plan/task/complete {task_id} -> reward_count -> tentativas
+GET  growth-plan/draw/status
+POST growth-plan/draw (X-Bce-Request-Id)
+POST growth-plan/prize/claim {draw_record_id, contact}
+```
+
+Nem toda tarefa pode ser concluída automaticamente. Tarefas com `query` ou `suiteName`
+exigem evidência real, e tarefas de assinatura exigem assinatura ativa; elas são marcadas
+como `needs_evidence`. A decisão final é do servidor — o script envia `task_id` e nunca
+fabrica comportamento. Sorteio/resgate passam pela assinatura acs+banti da Baidu, então uma
+resposta de risco é reportada como `RISK_BLOCKED`, nunca como sucesso.
+
+`--no-booster` · `--booster-only` · `--booster-dry-run` · `--no-draw` ·
+`--max-draw N` · `--contact CONTACT` · `--task ID|NAME`
 
 ## Credenciais
 

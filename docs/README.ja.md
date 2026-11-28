@@ -2,7 +2,7 @@
 
 # 🧭 DuMate Daily
 
-**Baidu DuMate 毎日ログインボーナス · 複数アカウント · status → claim → status / points 再確認**
+**Baidu DuMate 毎日ログインボーナス · ブーストプラン · 複数アカウント · status → claim → status / points 再確認**
 
 [简体中文](../README.md) · [English](README.en.md) · [繁體中文](README.zh-Hant.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Português (BR)](README.pt-BR.md)
 
@@ -39,6 +39,31 @@ GET loginBonusInfo
 ```
 
 HTTP 200 や POST 成功だけでは完了ではありません。
+
+## ブーストプラン（同一スクリプト）
+
+ログインボーナスとブーストプランは**同じスクリプト・同じ実行・同じ結果**で処理されます
+（別エントリポイントはありません）。サインイン後に成長プラン状態を読み、未完了タスクを
+`task_id` だけで順に送信し、サーバーが返す残り回数で抽選します。実物賞は `--contact` で
+受け取ります。
+
+```text
+GET  growth-plan/page/status
+POST growth-plan/tasks                   -> 未完了タスク
+POST growth-plan/task/complete {task_id} -> reward_count -> 抽選回数
+GET  growth-plan/draw/status
+POST growth-plan/draw (X-Bce-Request-Id)
+POST growth-plan/prize/claim {draw_record_id, contact}
+```
+
+すべてのタスクが自動で完了できるわけではありません。`query` や `suiteName` を持つ
+タスクは実行動の証拠が必要で、購読系タスクは実際の購読状態が必要です（`needs_evidence`
+で表示）。最終判定はサーバー側で、スクリプトは `task_id` を送るだけで行動を偽装しません。
+抽選・交換は Baidu acs+banti 署名を通るため、リスク判定は `RISK_BLOCKED` として報告し、
+成功として扱いません。
+
+`--no-booster` · `--booster-only` · `--booster-dry-run` · `--no-draw` ·
+`--max-draw N` · `--contact CONTACT` · `--task ID|NAME`
 
 ## 認証情報
 
