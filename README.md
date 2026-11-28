@@ -103,6 +103,44 @@ GET /api/dumate/points/loginBonusInfo
 
 ---
 
+<a id="booster"></a>
+## ⚡ 充能计划（做任务 / 抽奖 / 领奖）
+
+签到之外，官网还有「搭子充能计划」：做任务换抽奖次数，抽积分/实物。`dumate_booster.py`
+只跑这部分，账号 Cookie 与签到共用（同一套 `DUMATE_COOKIES`）。
+
+```text
+GET  /api/dumate/activity/growth-plan/page/status   活动是否开启
+POST /api/dumate/activity/growth-plan/tasks         任务列表（body: device/version）
+     |
+     +-- 逐个未完成任务 POST /api/dumate/activity/growth-plan/task/complete {"task_id": "..."}
+                         |
+                         +-- result.reward_count -> 累加抽奖次数
+GET  /api/dumate/activity/growth-plan/draw/status   剩余抽奖次数
+POST /api/dumate/activity/growth-plan/draw          抽奖（header: X-Bce-Request-Id）
+     |
+     +-- 实物奖需要联系方式 -> POST /growth-plan/prize/claim {draw_record_id, contact}
+```
+
+任务类型（`taskType`，来自前端枚举）：`CODE_MODE`、`QUERY_INPUT`、`CREATE_SCHEDULED_TASK`、
+`DUAL_LOGIN`、`USE_SKILL`、`MOBILE_PUSH`、`PC_PUSH`、`MEDIA_SUITE_CREATION`、`INVITATION`、
+`INVITED`、`DOWNLOAD_MOBILE_CHAT`、`DOWNLOAD_PC_CHAT`、`FIRST_CREATE_SCHEDULED_TASK`、
+`FIRST_PRO_AUTO_RENEW`、`PRO_AUTO_RENEW`、`COFFEE2026`、`SUITE`。
+
+```bash
+python3 dumate_booster.py                 # 查任务 → 能完成的完成 → 抽奖
+python3 dumate_booster.py --dry-run       # 只读：只看状态和任务，不做写操作
+python3 dumate_booster.py --no-draw       # 只做任务，不抽奖
+python3 dumate_booster.py --max-draw 3    # 最多抽 3 次
+python3 dumate_booster.py --contact 手机号 # 抽中实物奖时自动领奖
+```
+
+风控说明：官网对写操作（完成任务 / 抽奖 / 兑换）会走百度 acs+banti 签名，本脚本默认不带；
+一旦服务端返回风控提示，会明确报 `RISK_BLOCKED` 而不是假装成功。任务是否真的算完成由服务端
+判定 —— 脚本只提交 `task_id`，不伪造任务行为。
+
+---
+
 <a id="credentials"></a>
 ## 🔐 凭据格式
 
@@ -344,7 +382,7 @@ python dumate_daily.py --no-notify     # 本次不推送
 ```powershell
 python -m unittest discover -s tests -v
 python -m compileall -q .
-python -m ruff check dumate_daily.py dumate_login.py tests
+python -m ruff check dumate_daily.py dumate_booster.py dumate_login.py tests
 ```
 
 测试全部使用 fake response / fake session：
@@ -356,7 +394,9 @@ python -m ruff check dumate_daily.py dumate_login.py tests
 - HTML 登录页、302 登录跳转、401；
 - Cookie 引号与分号解析、CSRF 提取；
 - 多账号隔离、手机号标签掩码、敏感值脱敏；
-- 桌面 `auth.json` 的 AES-256-GCM 解密与域名过滤。
+- 桌面 `auth.json` 的 AES-256-GCM 解密与域名过滤；
+- 充能计划：任务列表（snake/camel、分组、repeat_count）、只对未完成任务提交、
+  `--dry-run` 零写操作、活动未开启时跳过、风控响应报 `RISK_BLOCKED`、抽奖失败不静默。
 
 > 单测通过只证明代码路径正确，不代表某个真实账号今天已领取成功。真实结果必须由实际运行后的 `hasIssued` 和积分差额回读证明。
 
@@ -410,8 +450,10 @@ DuMate-Daily/
 │   └── README.pt-BR.md
 ├── tests/
 │   ├── test_dumate_daily.py
+│   ├── test_dumate_booster.py
 │   └── test_dumate_login.py
 ├── dumate_daily.py
+├── dumate_booster.py
 ├── dumate_login.py
 ├── CHANGELOG.md
 ├── LICENSE
