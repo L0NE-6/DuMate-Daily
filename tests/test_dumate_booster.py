@@ -196,6 +196,43 @@ class RunAccountTests(unittest.TestCase):
         self.assertEqual(result["draw"]["prizes"][0]["error"], "BUSINESS_ERROR")
 
 
+class OnlyTasksTests(unittest.TestCase):
+    def test_only_named_task_is_attempted(self):
+        calls = []
+
+        def fake_request(session, method, url, *, headers, secrets, json_body=None):
+            calls.append((url, json_body))
+            key = url.rsplit("/api/dumate/activity", 1)[-1]
+            return {
+                "/growth-plan/page/status": {"result": {"enabled": True, "growth_plan_enable": True}},
+                "/growth-plan/tasks": {"success": True, "result": {"tasks": [
+                    {"task_id": "t1", "task_name": "任务一", "completed_count": 0, "repeat_count": 1},
+                    {"task_id": "t2", "task_name": "任务二", "completed_count": 0, "repeat_count": 1},
+                ]}},
+                "/growth-plan/task/complete": {"success": True, "result": {"reward_count": 1}},
+            }[key], 200
+
+        with mock.patch.object(booster, "make_session", return_value=mock.MagicMock()),              mock.patch.object(booster, "_request_json", side_effect=fake_request):
+            result = booster.run_account(account(), base_url="https://console.bce.baidu.com",
+                                         do_draw=False, only_tasks=["任务二"])
+        self.assertEqual([c["task_id"] for c in result["completed"]], ["t2"])
+        completes = [c for c in calls if c[0].endswith("/task/complete")]
+        self.assertEqual(len(completes), 1)
+        self.assertEqual(completes[0][1], {"task_id": "t2"})
+
+    def test_task_with_query_is_flagged_as_evidence_required(self):
+        tasks = booster.parse_tasks({"result": {"tasks": [
+            {"task_id": "q1", "task_type": "QUERY_INPUT", "query": "写一个排序",
+             "completed_count": 0, "repeat_count": 1},
+            {"task_id": "s1", "task_type": "USE_SKILL", "suiteName": "self-media-expert",
+             "completed_count": 0, "repeat_count": 1},
+        ]}})
+        self.assertTrue(tasks[0]["needs_evidence"])
+        self.assertEqual(tasks[0]["query"], "写一个排序")
+        self.assertTrue(tasks[1]["needs_evidence"])
+        self.assertEqual(tasks[1]["suite_name"], "self-media-expert")
+
+
 class SummaryTests(unittest.TestCase):
     def test_summary_counts(self):
         summary = booster.build_summary([

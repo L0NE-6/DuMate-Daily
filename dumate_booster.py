@@ -83,6 +83,22 @@ TASK_TYPES = (
     "SUITE",
 )
 
+# 前端对这些类型有前置行为校验（query / suiteName 命中才允许上报），
+# 只提交 task_id 大概率不会被认可 —— 报告里单独标出来，仍然可以逐个试。
+EVIDENCE_REQUIRED_TYPES = {
+    "CODE_MODE",
+    "QUERY_INPUT",
+    "USE_SKILL",
+    "CREATE_SCHEDULED_TASK",
+    "FIRST_CREATE_SCHEDULED_TASK",
+    "SUITE",
+    "MEDIA_SUITE_CREATION",
+    "INVITATION",
+    "INVITED",
+    "FIRST_PRO_AUTO_RENEW",
+    "PRO_AUTO_RENEW",
+}
+
 DEFAULT_CLIENT_VERSION = "1.0.82"
 DEFAULT_DEVICE = "pc"
 
@@ -193,6 +209,10 @@ def _normalize_task(item: Mapping[str, Any]) -> dict[str, Any]:
         "finished": completed >= repeat,
         "reward_points": _number(_pick(item, "reward_points", "rewardPoints", "points")),
         "jump_url": _pick(item, "jump_url", "jumpUrl"),
+        # 前端 gate：任务可上报前会校验 query 是否被当前产物命中、SUITE 是否真用了对应套件
+        "query": _pick(item, "query"),
+        "suite_name": _pick(item, "suite_name", "suiteName"),
+        "needs_evidence": bool(_pick(item, "query") or _pick(item, "suite_name", "suiteName")),
     }
 
 
@@ -347,6 +367,7 @@ def run_account(
     contact: str = "",
     device: str = DEFAULT_DEVICE,
     version: str = DEFAULT_CLIENT_VERSION,
+    only_tasks: Sequence[str] = (),
 ) -> dict[str, Any]:
     label = str(account.get("label") or "")
     secrets = list(account.get("secrets") or [])
@@ -370,7 +391,13 @@ def run_account(
 
         tasks = fetch_tasks(session, base_url, account, secrets, device=device, version=version)
         result["tasks_before"] = tasks
+        wanted = {str(x).strip() for x in only_tasks if str(x).strip()}
         pending = [t for t in tasks if not t["finished"]]
+        if wanted:
+            pending = [
+                t for t in pending
+                if t["task_id"] in wanted or str(t.get("task_name") or "") in wanted
+            ]
         if dry_run:
             result.update(ok=True, note="dry-run：只读，不完成任务也不抽奖")
             return result
@@ -456,6 +483,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contact", default="", help="联系方式，抽中实物奖时用于领奖")
     parser.add_argument("--device", default=DEFAULT_DEVICE, help="任务列表 device 参数")
     parser.add_argument("--version", default=DEFAULT_CLIENT_VERSION, help="任务列表 version 参数")
+    parser.add_argument(
+        "--task",
+        action="append",
+        default=[],
+        metavar="TASK_ID|名称",
+        help="只尝试指定任务（可重复），用于逐个验证哪些任务真的能完成",
+    )
     parser.add_argument("--json", action="store_true", help="输出完整 JSON")
     return parser
 
@@ -480,6 +514,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             contact=args.contact,
             device=args.device,
             version=args.version,
+            only_tasks=args.task,
         )
         for account in accounts
     ]
@@ -511,8 +546,12 @@ def _print_human(summary: Mapping[str, Any]) -> None:
         print("  任务: 共 %d 个，未完成 %d 个"
               % (len(res.get("tasks_before") or []), len(pending)))
         for t in pending:
-            print("    - [%s] %s  (%s/%s)"
-                  % (t.get("task_type"), t.get("task_name"), t["completed_count"], t["repeat_count"]))
+            flag = ""
+            if t.get("needs_evidence") or t.get("task_type") in EVIDENCE_REQUIRED_TYPES:
+                flag = "  ← 需真实前置行为(可能不通过)"
+            print("    - [%s] %s  (%s/%s)%s"
+                  % (t.get("task_type"), t.get("task_name"), t["completed_count"],
+                     t["repeat_count"], flag))
         for c in res.get("completed") or []:
             print("  ✅ 完成 %s → 奖励次数 +%s" % (c.get("name") or c.get("task_id"), c.get("reward_count")))
         for f in res.get("tasks_failed") or []:

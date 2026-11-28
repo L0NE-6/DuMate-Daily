@@ -13,7 +13,9 @@ All notable changes to DuMate Daily are documented in this file.
 - 写操作安全开关：`--dry-run` 零写操作、`--no-draw` 只做任务、`--max-draw` 限制抽奖次数、
   `--contact` 用于实物奖领奖。
 - 风控显式失败：服务端返回风控提示时报 `RISK_BLOCKED`，不把拦截当成功。
-- 新增 `tests/test_dumate_booster.py`（15 个用例），全量 36 个单测通过。
+- 任务分型标注：`query` / `suiteName` 字段与行为型任务类型会在报告里标出「需真实前置行为」。
+- `--task TASK_ID|名称` 支持只尝试指定任务，便于逐个验证哪些任务服务端真的认。
+- 新增 `tests/test_dumate_booster.py`（17 个用例），全量 38 个单测通过。
 
 ## [1.0.0] - 2026-11-24
 
